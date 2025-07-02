@@ -61,8 +61,11 @@ extract_isaacsim_path() {
 
 # extract the python from isaacsim
 extract_python_exe() {
-    # check if using conda
-    if ! [[ -z "${CONDA_PREFIX}" ]]; then
+    # check if using virtual environment (venv or conda)
+    if ! [[ -z "${VIRTUAL_ENV}" ]]; then
+        # use venv python
+        local python_exe=${VIRTUAL_ENV}/bin/python
+    elif ! [[ -z "${CONDA_PREFIX}" ]]; then
         # use conda python
         local python_exe=${CONDA_PREFIX}/bin/python
     else
@@ -82,7 +85,7 @@ extract_python_exe() {
     if [ ! -f "${python_exe}" ]; then
         echo -e "[ERROR] Unable to find any Python executable at path: '${python_exe}'" >&2
         echo -e "\tThis could be due to the following reasons:" >&2
-        echo -e "\t1. Conda environment is not activated." >&2
+        echo -e "\t1. Virtual environment (venv) or Conda environment is not activated." >&2
         echo -e "\t2. Isaac Sim pip package 'isaacsim-rl' is not installed." >&2
         echo -e "\t3. Python executable is not available at the default path: ${ISAACLAB_PATH}/_isaac_sim/python.sh" >&2
         exit 1
@@ -121,11 +124,116 @@ install_isaaclab_extension() {
     # if the directory contains setup.py then install the python module
     if [ -f "$1/setup.py" ]; then
         echo -e "\t module: $1"
-        ${python_exe} -m pip install --editable $1
+        # check if uv is available, otherwise fallback to pip
+        if command -v uv &> /dev/null; then
+            uv pip install --editable $1
+        else
+            ${python_exe} -m pip install --editable $1
+        fi
     fi
 }
 
-# setup anaconda environment for Isaac Lab
+# setup virtual environment for Isaac Lab using uv or venv
+setup_venv() {
+    # get environment name/path from input
+    local env_name=$1
+    local venv_path="${ISAACLAB_PATH}/${env_name}"
+    
+    # check if uv is available, otherwise use venv
+    if command -v uv &> /dev/null; then
+        echo "[INFO] Using uv to create virtual environment..."
+        # check if the environment exists
+        if [ -d "${venv_path}" ]; then
+            echo -e "[INFO] Virtual environment '${env_name}' already exists at ${venv_path}."
+        else
+            echo -e "[INFO] Creating virtual environment '${env_name}' using uv..."
+            uv venv ${venv_path}
+        fi
+        
+        # activate the environment and install dependencies
+        source ${venv_path}/bin/activate
+        
+        # install dependencies using uv
+        if [ -f "${ISAACLAB_PATH}/pyproject.toml" ]; then
+            echo -e "[INFO] Installing dependencies from pyproject.toml..."
+            uv pip install -e .
+        elif [ -f "${ISAACLAB_PATH}/requirements.txt" ]; then
+            echo -e "[INFO] Installing dependencies from requirements.txt..."
+            uv pip install -r ${ISAACLAB_PATH}/requirements.txt
+        fi
+        
+    else
+        echo "[INFO] Using python venv to create virtual environment..."
+        # check python is available
+        if ! command -v python &> /dev/null; then
+            echo "[ERROR] Python could not be found. Please install python and try again."
+            exit 1
+        fi
+        
+        # check if the environment exists
+        if [ -d "${venv_path}" ]; then
+            echo -e "[INFO] Virtual environment '${env_name}' already exists at ${venv_path}."
+        else
+            echo -e "[INFO] Creating virtual environment '${env_name}' using python venv..."
+            python -m venv ${venv_path}
+        fi
+        
+        # activate the environment and install dependencies
+        source ${venv_path}/bin/activate
+        
+        # upgrade pip first
+        python -m pip install --upgrade pip
+        
+        # install dependencies
+        if [ -f "${ISAACLAB_PATH}/pyproject.toml" ]; then
+            echo -e "[INFO] Installing dependencies from pyproject.toml..."
+            python -m pip install -e .
+        elif [ -f "${ISAACLAB_PATH}/requirements.txt" ]; then
+            echo -e "[INFO] Installing dependencies from requirements.txt..."
+            python -m pip install -r ${ISAACLAB_PATH}/requirements.txt
+        fi
+    fi
+
+    # create activation script
+    local activate_script="${venv_path}/bin/activate_isaaclab"
+    printf '%s\n' '#!/usr/bin/env bash' '' \
+        '# Activate Isaac Lab virtual environment' \
+        'source '${venv_path}'/bin/activate' \
+        '' \
+        '# Set Isaac Lab environment variables' \
+        'export ISAACLAB_PATH='${ISAACLAB_PATH}'' \
+        'alias isaaclab='${ISAACLAB_PATH}'/isaaclab.sh' \
+        '' \
+        '# show icon if not running headless' \
+        'export RESOURCE_NAME="IsaacSim"' \
+        '' > ${activate_script}
+
+    # check if we have _isaac_sim directory -> if so that means binaries were installed.
+    local isaacsim_setup_env_script=${ISAACLAB_PATH}/_isaac_sim/setup_conda_env.sh
+    if [ -f "${isaacsim_setup_env_script}" ]; then
+        printf '%s\n' \
+            '# for Isaac Sim' \
+            'source '${isaacsim_setup_env_script}'' \
+            '' >> ${activate_script}
+    fi
+
+    # make the script executable
+    chmod +x ${activate_script}
+    
+    # deactivate the environment
+    deactivate
+    
+    # add information to the user
+    echo -e "[INFO] Created virtual environment '${env_name}' at ${venv_path}.\n"
+    echo -e "\t\t1. To activate the environment, run:                source ${activate_script}"
+    echo -e "\t\t   Or manually:                                     source ${venv_path}/bin/activate"
+    echo -e "\t\t2. To install Isaac Lab extensions, run:            isaaclab -i"
+    echo -e "\t\t3. To perform formatting, run:                      isaaclab -f"
+    echo -e "\t\t4. To deactivate the environment, run:              deactivate"
+    echo -e "\n"
+}
+
+# setup anaconda environment for Isaac Lab (kept for backward compatibility)
 setup_conda_env() {
     # get environment name from input
     local env_name=$1
@@ -240,7 +348,7 @@ update_vscode_settings() {
 
 # print the usage description
 print_help () {
-    echo -e "\nusage: $(basename "$0") [-h] [-i] [-f] [-p] [-s] [-t] [-o] [-v] [-d] [-n] [-c] -- Utility to manage Isaac Lab."
+    echo -e "\nusage: $(basename "$0") [-h] [-i] [-f] [-p] [-s] [-t] [-o] [-v] [-d] [-n] [-c] [-e] -- Utility to manage Isaac Lab."
     echo -e "\noptional arguments:"
     echo -e "\t-h, --help           Display the help content."
     echo -e "\t-i, --install [LIB]  Install the extensions inside Isaac Lab and learning frameworks as extra dependencies. Default is 'all'."
@@ -253,6 +361,7 @@ print_help () {
     echo -e "\t-d, --docs           Build the documentation from source using sphinx."
     echo -e "\t-n, --new            Create a new external project or internal task from template."
     echo -e "\t-c, --conda [NAME]   Create the conda environment for Isaac Lab. Default name is 'env_isaaclab'."
+    echo -e "\t-e, --venv [NAME]    Create the virtual environment for Isaac Lab using uv or venv. Default name is 'venv_isaaclab'."
     echo -e "\n" >&2
 }
 
@@ -298,8 +407,13 @@ while [[ $# -gt 0 ]]; do
                 shift # past argument
             fi
             # install the learning frameworks specified
-            ${python_exe} -m pip install -e ${ISAACLAB_PATH}/source/isaaclab_rl["${framework_name}"]
-            ${python_exe} -m pip install -e ${ISAACLAB_PATH}/source/isaaclab_mimic["${framework_name}"]
+            if command -v uv &> /dev/null; then
+                uv pip install -e ${ISAACLAB_PATH}/source/isaaclab_rl["${framework_name}"]
+                uv pip install -e ${ISAACLAB_PATH}/source/isaaclab_mimic["${framework_name}"]
+            else
+                ${python_exe} -m pip install -e ${ISAACLAB_PATH}/source/isaaclab_rl["${framework_name}"]
+                ${python_exe} -m pip install -e ${ISAACLAB_PATH}/source/isaaclab_mimic["${framework_name}"]
+            fi
 
             # check if we are inside a docker container or are building a docker image
             # in that case don't setup VSCode since it asks for EULA agreement which triggers user interaction
@@ -330,6 +444,20 @@ while [[ $# -gt 0 ]]; do
             setup_conda_env ${conda_env_name}
             shift # past argument
             ;;
+        -e|--venv)
+            # use default name if not provided
+            if [ -z "$2" ]; then
+                echo "[INFO] Using default virtual environment name: venv_isaaclab"
+                venv_name="venv_isaaclab"
+            else
+                echo "[INFO] Using virtual environment name: $2"
+                venv_name=$2
+                shift # past argument
+            fi
+            # setup the virtual environment for Isaac Lab
+            setup_venv ${venv_name}
+            shift # past argument
+            ;;
         -f|--format)
             # reset the python path to avoid conflicts with pre-commit
             # this is needed because the pre-commit hooks are installed in a separate virtual environment
@@ -342,7 +470,11 @@ while [[ $# -gt 0 ]]; do
             # check if pre-commit is installed
             if ! command -v pre-commit &>/dev/null; then
                 echo "[INFO] Installing pre-commit..."
-                pip install pre-commit
+                if command -v uv &> /dev/null; then
+                    uv pip install pre-commit
+                else
+                    pip install pre-commit
+                fi
             fi
             # always execute inside the Isaac Lab directory
             echo "[INFO] Formatting the repository..."
@@ -380,7 +512,11 @@ while [[ $# -gt 0 ]]; do
             python_exe=$(extract_python_exe)
             shift # past argument
             echo "[INFO] Installing template dependencies..."
-            ${python_exe} -m pip install -q -r ${ISAACLAB_PATH}/tools/template/requirements.txt
+            if command -v uv &> /dev/null; then
+                uv pip install -q -r ${ISAACLAB_PATH}/tools/template/requirements.txt
+            else
+                ${python_exe} -m pip install -q -r ${ISAACLAB_PATH}/tools/template/requirements.txt
+            fi
             echo -e "\n[INFO] Running template generator...\n"
             ${python_exe} ${ISAACLAB_PATH}/tools/template/cli.py $@
             # exit neatly
@@ -417,7 +553,11 @@ while [[ $# -gt 0 ]]; do
             python_exe=$(extract_python_exe)
             # install pip packages
             cd ${ISAACLAB_PATH}/docs
-            ${python_exe} -m pip install -r requirements.txt > /dev/null
+            if command -v uv &> /dev/null; then
+                uv pip install -r requirements.txt > /dev/null
+            else
+                ${python_exe} -m pip install -r requirements.txt > /dev/null
+            fi
             # build the documentation
             ${python_exe} -m sphinx -b html -d _build/doctrees . _build/current
             # open the documentation
